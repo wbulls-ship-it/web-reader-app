@@ -1,0 +1,6 @@
+
+gradio
+trafilatura
+beautifulsoup4
+lxml
+requests
