@@ -1,3 +1,4 @@
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -82,6 +83,8 @@ class PiperTTSProviderTests(unittest.TestCase):
         with TemporaryDirectory() as tmpdir, patch("tts.piper_provider.shutil.which", return_value="/usr/bin/piper"):
             model = Path(tmpdir) / "voice.onnx"
             model.write_text("model")
+            config = Path(tmpdir) / "voice.onnx.json"
+            config.write_text("config")
 
             def fake_run(command, input, text, stdout, stderr, check):
                 output_path = Path(command[command.index("--output_file") + 1])
@@ -94,14 +97,65 @@ class PiperTTSProviderTests(unittest.TestCase):
 
                 return Completed()
 
-            provider = PiperTTSProvider(executable="piper", voice_model=model)
+            provider = PiperTTSProvider(executable="piper", voice_model=model, voice_config=config)
             with patch("tts.piper_provider.subprocess.run", side_effect=fake_run) as run:
                 result = provider.synthesize(SynthesisRequest(text=" hello "))
 
         self.assertEqual(result.audio, b"RIFF fake wav")
         self.assertEqual(result.audio_format, "wav")
         self.assertEqual(result.provider, "piper")
+        command = run.call_args.args[0]
+        self.assertIn("--config", command)
+        self.assertEqual(command[command.index("--config") + 1], str(config))
         self.assertEqual(run.call_args.kwargs["input"], "hello")
+
+    def test_piper_auto_detects_colab_layout(self):
+        with TemporaryDirectory() as tmpdir, patch("tts.piper_provider.shutil.which", return_value="./piper/piper"):
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(tmpdir)
+                executable = Path("piper/piper")
+                executable.parent.mkdir()
+                executable.write_text("#!/bin/sh\n")
+                model = Path("piper_models/zh_CN-huayan-medium.onnx")
+                model.parent.mkdir()
+                model.write_text("model")
+                config = Path("piper_models/zh_CN-huayan-medium.onnx.json")
+                config.write_text("config")
+
+                provider = PiperTTSProvider()
+
+                self.assertEqual(provider.executable, "piper/piper")
+                self.assertEqual(provider.voice_model, model)
+                self.assertEqual(provider.voice_config, config)
+                provider._validate_installation()
+                provider._validate_voice_model()
+            finally:
+                os.chdir(previous_cwd)
+
+    def test_piper_reports_missing_colab_defaults(self):
+        with TemporaryDirectory() as tmpdir, patch("tts.piper_provider.shutil.which", return_value=None):
+            previous_cwd = Path.cwd()
+            try:
+                os.chdir(tmpdir)
+                provider = PiperTTSProvider()
+
+                with self.assertRaises(PiperNotInstalledError) as executable_error:
+                    provider._validate_installation()
+                with self.assertRaises(PiperVoiceNotFoundError) as voice_error:
+                    provider._validate_voice_model()
+
+                self.assertIn("./piper/piper", str(executable_error.exception))
+                self.assertIn("piper_models/zh_CN-huayan-medium.onnx", str(voice_error.exception))
+                self.assertIn("piper_models/zh_CN-huayan-medium.onnx.json", str(voice_error.exception))
+
+                with self.assertRaises(PiperNotInstalledError) as ready_error:
+                    provider.synthesize(SynthesisRequest(text="hello"))
+                self.assertIn("./piper/piper", str(ready_error.exception))
+                self.assertIn("piper_models/zh_CN-huayan-medium.onnx", str(ready_error.exception))
+                self.assertIn("piper_models/zh_CN-huayan-medium.onnx.json", str(ready_error.exception))
+            finally:
+                os.chdir(previous_cwd)
 
 
 if __name__ == "__main__":

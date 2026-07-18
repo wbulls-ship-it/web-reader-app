@@ -12,6 +12,11 @@ from .provider import SynthesisRequest, SynthesisResult, Voice
 from .text_utils import normalize_text
 
 
+COLAB_PIPER_EXECUTABLE = Path("./piper/piper")
+COLAB_PIPER_MODEL = Path("./piper_models/zh_CN-huayan-medium.onnx")
+COLAB_PIPER_CONFIG = Path("./piper_models/zh_CN-huayan-medium.onnx.json")
+
+
 class PiperNotInstalledError(RuntimeError):
     """Raised when the Piper executable cannot be found."""
 
@@ -36,9 +41,14 @@ class PiperTTSProvider:
         voice_model: str | os.PathLike[str] | None = None,
         voice_config: str | os.PathLike[str] | None = None,
     ):
-        self.executable = executable or os.environ.get("PIPER_EXECUTABLE", "piper")
-        self.voice_model = Path(voice_model or os.environ.get("PIPER_VOICE_MODEL", "")).expanduser()
+        env_voice_model = os.environ.get("PIPER_VOICE_MODEL")
+        using_default_colab_model = voice_model is None and not env_voice_model
+
+        self.executable = executable or os.environ.get("PIPER_EXECUTABLE") or str(COLAB_PIPER_EXECUTABLE)
+        self.voice_model = Path(voice_model or env_voice_model or COLAB_PIPER_MODEL).expanduser()
         config = voice_config or os.environ.get("PIPER_VOICE_CONFIG")
+        if config is None and using_default_colab_model:
+            config = COLAB_PIPER_CONFIG
         self.voice_config = Path(config).expanduser() if config else None
 
     def list_voices(self) -> list[Voice]:
@@ -53,8 +63,7 @@ class PiperTTSProvider:
         if not text:
             raise ValueError("text is required")
 
-        self._validate_installation()
-        self._validate_voice_model()
+        self._validate_ready()
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as audio_file:
             output_path = Path(audio_file.name)
@@ -89,16 +98,40 @@ class PiperTTSProvider:
             metadata={"characters": str(len(text))},
         )
 
+    def _validate_ready(self) -> None:
+        missing_installation = self._missing_installation_message()
+        missing_voice = self._missing_voice_messages()
+
+        if missing_installation and missing_voice:
+            raise PiperNotInstalledError(" ".join([missing_installation, *missing_voice]))
+        if missing_installation:
+            raise PiperNotInstalledError(missing_installation)
+        if missing_voice:
+            raise PiperVoiceNotFoundError(" ".join(missing_voice))
+
     def _validate_installation(self) -> None:
+        message = self._missing_installation_message()
+        if message:
+            raise PiperNotInstalledError(message)
+
+    def _missing_installation_message(self) -> str | None:
         if shutil.which(self.executable) is None:
-            raise PiperNotInstalledError(
-                "Piper is not installed or is not on PATH. Install Piper, or set PIPER_EXECUTABLE to the Piper binary."
-            )
+            return "Piper executable was not found. Expected Colab path ./piper/piper, or set PIPER_EXECUTABLE to the Piper binary."
+        return None
 
     def _validate_voice_model(self) -> None:
+        missing = self._missing_voice_messages()
+        if missing:
+            raise PiperVoiceNotFoundError(" ".join(missing))
+
+    def _missing_voice_messages(self) -> list[str]:
+        missing = []
         if not str(self.voice_model) or str(self.voice_model) == ".":
-            raise PiperVoiceNotFoundError("Piper voice model is not configured. Set PIPER_VOICE_MODEL to a .onnx voice file.")
-        if not self.voice_model.is_file():
-            raise PiperVoiceNotFoundError(f"Piper voice model was not found: {self.voice_model}")
+            missing.append("Piper voice model is not configured; expected ./piper_models/zh_CN-huayan-medium.onnx or set PIPER_VOICE_MODEL.")
+        elif not self.voice_model.is_file():
+            missing.append(f"Piper voice model was not found: {self.voice_model}")
+
         if self.voice_config and not self.voice_config.is_file():
-            raise PiperVoiceNotFoundError(f"Piper voice config was not found: {self.voice_config}")
+            missing.append(f"Piper voice config was not found: {self.voice_config}")
+
+        return missing
