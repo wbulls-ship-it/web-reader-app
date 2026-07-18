@@ -1,6 +1,20 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from tts import FakeTTSProvider, TTSService, Voice, join_chunks, normalize_text, split_text
+from tts import (
+    FakeTTSProvider,
+    PiperNotInstalledError,
+    PiperTTSProvider,
+    PiperVoiceNotFoundError,
+    TTSService,
+    Voice,
+    join_chunks,
+    normalize_text,
+    split_text,
+)
+from tts.provider import SynthesisRequest
 
 
 class TextUtilitiesTests(unittest.TestCase):
@@ -45,6 +59,49 @@ class TTSServiceTests(unittest.TestCase):
             service.synthesize("   ")
         with self.assertRaises(ValueError):
             service.synthesize("hello", provider_name="missing")
+
+
+class PiperTTSProviderTests(unittest.TestCase):
+    def test_piper_reports_missing_executable(self):
+        with TemporaryDirectory() as tmpdir, patch("tts.piper_provider.shutil.which", return_value=None):
+            model = Path(tmpdir) / "voice.onnx"
+            model.write_text("model")
+            provider = PiperTTSProvider(executable="missing-piper", voice_model=model)
+
+            with self.assertRaises(PiperNotInstalledError):
+                provider.synthesize(SynthesisRequest(text="hello"))
+
+    def test_piper_reports_missing_voice_model(self):
+        with patch("tts.piper_provider.shutil.which", return_value="/usr/bin/piper"):
+            provider = PiperTTSProvider(voice_model="/missing/voice.onnx")
+
+            with self.assertRaises(PiperVoiceNotFoundError):
+                provider.synthesize(SynthesisRequest(text="hello"))
+
+    def test_piper_invokes_cli_and_returns_wav_bytes(self):
+        with TemporaryDirectory() as tmpdir, patch("tts.piper_provider.shutil.which", return_value="/usr/bin/piper"):
+            model = Path(tmpdir) / "voice.onnx"
+            model.write_text("model")
+
+            def fake_run(command, input, text, stdout, stderr, check):
+                output_path = Path(command[command.index("--output_file") + 1])
+                output_path.write_bytes(b"RIFF fake wav")
+
+                class Completed:
+                    returncode = 0
+                    stdout = ""
+                    stderr = ""
+
+                return Completed()
+
+            provider = PiperTTSProvider(executable="piper", voice_model=model)
+            with patch("tts.piper_provider.subprocess.run", side_effect=fake_run) as run:
+                result = provider.synthesize(SynthesisRequest(text=" hello "))
+
+        self.assertEqual(result.audio, b"RIFF fake wav")
+        self.assertEqual(result.audio_format, "wav")
+        self.assertEqual(result.provider, "piper")
+        self.assertEqual(run.call_args.kwargs["input"], "hello")
 
 
 if __name__ == "__main__":
