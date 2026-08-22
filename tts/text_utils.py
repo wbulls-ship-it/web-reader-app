@@ -9,6 +9,15 @@ _SENTENCE_BOUNDARY = re.compile(r"(?<=[。！？.!?])\s+")
 _WHITESPACE = re.compile(r"[ \t\r\f\v]+")
 
 
+def detect_language(text: str | None) -> str:
+    """Return ``zh`` when Han characters outnumber Latin letters, else ``en``."""
+
+    normalized = normalize_text(text)
+    han_count = len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff]", normalized))
+    latin_count = len(re.findall(r"[A-Za-z]", normalized))
+    return "zh" if han_count > latin_count else "en"
+
+
 def normalize_text(text: str | None) -> str:
     """Normalize user/article text before it is sent to a TTS provider."""
 

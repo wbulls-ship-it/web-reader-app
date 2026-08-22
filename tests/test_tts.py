@@ -1,16 +1,20 @@
 import os
 import unittest
+import wave
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from tts import (
     FakeTTSProvider,
+    KokoroTTSProvider,
     PiperNotInstalledError,
     PiperTTSProvider,
     PiperVoiceNotFoundError,
     TTSService,
     Voice,
+    detect_language,
     join_chunks,
     normalize_text,
     split_text,
@@ -19,6 +23,10 @@ from tts.provider import SynthesisRequest
 
 
 class TextUtilitiesTests(unittest.TestCase):
+    def test_detect_language_selects_primary_script(self):
+        self.assertEqual(detect_language("这是以中文为主的 article。"), "zh")
+        self.assertEqual(detect_language("This article has one 中文 term."), "en")
+
     def test_normalize_text_collapses_spaces_and_blank_lines(self):
         self.assertEqual(normalize_text("  Hello\t world\r\n\r\n\r\nNext  line  "), "Hello world\n\nNext line")
 
@@ -60,6 +68,53 @@ class TTSServiceTests(unittest.TestCase):
             service.synthesize("   ")
         with self.assertRaises(ValueError):
             service.synthesize("hello", provider_name="missing")
+
+
+class KokoroTTSProviderTests(unittest.TestCase):
+    def test_lists_required_chinese_and_english_voices(self):
+        voices = KokoroTTSProvider(lambda **kwargs: None).list_voices()
+
+        self.assertEqual([voice.id for voice in voices], ["zf_xiaoxiao", "zf_xiaoyi", "af_heart"])
+
+    def test_uses_language_pipeline_default_voice_and_speed(self):
+        calls = []
+
+        class Pipeline:
+            def __init__(self, lang_code):
+                self.lang_code = lang_code
+
+            def __call__(self, text, voice, speed):
+                calls.append((self.lang_code, text, voice, speed))
+                return [(None, None, [0.0, 0.5, -0.5])]
+
+        provider = KokoroTTSProvider(lambda lang_code: Pipeline(lang_code))
+        result = provider.synthesize(SynthesisRequest(text=" 你好 ", language="zh-CN", speaking_rate=1.2))
+
+        self.assertEqual(calls, [("z", "你好", "zf_xiaoxiao", 1.2)])
+        self.assertEqual(result.voice_id, "zf_xiaoxiao")
+        self.assertEqual(result.metadata["language"], "zh")
+        with wave.open(BytesIO(result.audio), "rb") as audio:
+            self.assertEqual(audio.getframerate(), 24_000)
+            self.assertEqual(audio.getnframes(), 3)
+
+    def test_voice_choice_selects_matching_pipeline(self):
+        language_codes = []
+
+        def factory(lang_code):
+            language_codes.append(lang_code)
+            return lambda text, voice, speed: [(None, None, [0.1])]
+
+        provider = KokoroTTSProvider(factory)
+        provider.synthesize(SynthesisRequest(text="English", language="en", voice_id="zf_xiaoyi"))
+
+        self.assertEqual(language_codes, ["z"])
+
+    def test_rejects_unsupported_speed_and_format(self):
+        provider = KokoroTTSProvider(lambda **kwargs: None)
+        with self.assertRaises(ValueError):
+            provider.synthesize(SynthesisRequest(text="hello", speaking_rate=2.1))
+        with self.assertRaises(ValueError):
+            provider.synthesize(SynthesisRequest(text="hello", audio_format="mp3"))
 
 
 class PiperTTSProviderTests(unittest.TestCase):
