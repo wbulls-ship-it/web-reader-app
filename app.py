@@ -4,7 +4,14 @@ from uuid import uuid4
 
 import gradio as gr
 from core import extract_article
-from tts import PiperNotInstalledError, PiperSynthesisError, PiperTTSProvider, PiperVoiceNotFoundError, TTSService
+from tts import (
+    KokoroNotInstalledError,
+    KokoroSynthesisError,
+    KokoroTTSProvider,
+    PiperTTSProvider,
+    TTSService,
+    detect_language,
+)
 
 
 AUDIO_DIR = Path(tempfile.gettempdir()) / "web-reader-audio"
@@ -38,19 +45,25 @@ def read_article(url):
     )
 
 
-def read_aloud(article_text):
+def read_aloud(article_text, voice_choice="Auto (recommended)", playback_speed=1.0):
     article_text = (article_text or "").strip()
     if not article_text:
         return "请先成功提取一篇文章，再点击 Read Aloud。", None
 
     try:
-        service = TTSService([PiperTTSProvider()], default_provider="piper")
-        result = service.synthesize(article_text, provider_name="piper", audio_format="wav")
-    except PiperNotInstalledError as exc:
-        return f"Piper 未安装或不可用：{exc}", None
-    except PiperVoiceNotFoundError as exc:
-        return f"Piper 语音模型缺失：{exc}", None
-    except (PiperSynthesisError, ValueError, OSError) as exc:
+        language = detect_language(article_text)
+        voice_id = None if voice_choice.startswith("Auto") else voice_choice
+        service = TTSService([KokoroTTSProvider(), PiperTTSProvider()], default_provider="kokoro")
+        result = service.synthesize(
+            article_text,
+            voice_id=voice_id,
+            language=language,
+            speaking_rate=float(playback_speed),
+            audio_format="wav",
+        )
+    except KokoroNotInstalledError as exc:
+        return f"Kokoro 未安装或与当前 Python 版本不兼容：{exc}", None
+    except (KokoroSynthesisError, ValueError, OSError) as exc:
         return f"语音合成失败：{exc}", None
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -72,6 +85,12 @@ with gr.Blocks(title="Web Reader") as demo:
     status_output = gr.Textbox(label="状态")
 
     read_button = gr.Button("Read Aloud")
+    voice_input = gr.Dropdown(
+        ["Auto (recommended)", "zf_xiaoxiao", "zf_xiaoyi", "af_heart"],
+        value="Auto (recommended)",
+        label="朗读声音",
+    )
+    speed_input = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="播放速度")
     audio_output = gr.Audio(label="朗读音频", type="filepath")
 
     extract_button.click(
@@ -84,7 +103,11 @@ with gr.Blocks(title="Web Reader") as demo:
         inputs=url_input,
         outputs=[title_output, info_output, text_output, status_output, audio_output],
     )
-    read_button.click(fn=read_aloud, inputs=text_output, outputs=[status_output, audio_output])
+    read_button.click(
+        fn=read_aloud,
+        inputs=[text_output, voice_input, speed_input],
+        outputs=[status_output, audio_output],
+    )
 
 
 if __name__ == "__main__":
