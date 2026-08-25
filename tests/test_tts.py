@@ -6,6 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import numpy as np
+
 from tts import (
     FakeTTSProvider,
     KokoroTTSProvider,
@@ -108,6 +110,46 @@ class KokoroTTSProviderTests(unittest.TestCase):
         provider.synthesize(SynthesisRequest(text="English", language="en", voice_id="zf_xiaoyi"))
 
         self.assertEqual(language_codes, ["z"])
+
+    def test_reuses_each_loaded_language_pipeline(self):
+        language_codes = []
+
+        def factory(lang_code):
+            language_codes.append(lang_code)
+            return lambda text, voice, speed: [(None, None, np.array([0.1], dtype=np.float32))]
+
+        provider = KokoroTTSProvider(factory)
+        provider.synthesize(SynthesisRequest(text="First", language="en"))
+        provider.synthesize(SynthesisRequest(text="Second", language="en"))
+        provider.synthesize(SynthesisRequest(text="你好", language="zh"))
+        provider.synthesize(SynthesisRequest(text="再见", language="zh"))
+
+        self.assertEqual(language_codes, ["a", "z"])
+
+    def test_wav_output_combines_numpy_and_tensor_like_chunks(self):
+        class TensorLike:
+            def detach(self):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return np.array([[1.5, -1.5]], dtype=np.float32)
+
+        def pipeline(text, voice, speed):
+            return [
+                (None, None, np.array([0.0, 0.5], dtype=np.float32)),
+                (None, None, TensorLike()),
+            ]
+
+        provider = KokoroTTSProvider(lambda **kwargs: pipeline)
+        result = provider.synthesize(SynthesisRequest(text="audio", language="en"))
+
+        with wave.open(BytesIO(result.audio), "rb") as audio:
+            self.assertEqual(audio.getparams()[:4], (1, 2, 24_000, 4))
+            pcm = np.frombuffer(audio.readframes(4), dtype="<i2")
+        np.testing.assert_array_equal(pcm, np.array([0, 16384, 32767, -32767], dtype=np.int16))
 
     def test_rejects_unsupported_speed_and_format(self):
         provider = KokoroTTSProvider(lambda **kwargs: None)
