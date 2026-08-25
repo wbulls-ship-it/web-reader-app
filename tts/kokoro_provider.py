@@ -14,12 +14,17 @@ from collections.abc import Callable, Iterable
 import numpy as np
 
 from .provider import SynthesisRequest, SynthesisResult, Voice
-from .text_utils import normalize_text
+from .text_utils import detect_language, normalize_text
 
 KOKORO_SAMPLE_RATE = 24_000
 DEFAULT_VOICES = {
     "zh": "zf_xiaoxiao",
     "en": "af_heart",
+}
+VOICE_LANGUAGES = {
+    "zf_xiaoxiao": "zh",
+    "zf_xiaoyi": "zh",
+    "af_heart": "en",
 }
 logger = logging.getLogger(__name__)
 
@@ -60,23 +65,30 @@ class KokoroTTSProvider:
         if not 0.5 <= request.speaking_rate <= 2.0:
             raise ValueError("speaking_rate must be between 0.5 and 2.0")
 
-        language = _language_code(request.language)
+        detected_language = detect_language(text)
+        language = _language_code(request.language) if request.language else detected_language
         voice = request.voice_id or DEFAULT_VOICES[language]
-        if voice.startswith("zf_"):
-            language = "zh"
-        elif voice.startswith("af_"):
-            language = "en"
+        voice_language = VOICE_LANGUAGES.get(voice)
+        if voice_language is None:
+            raise ValueError(f"unsupported Kokoro voice: {voice}")
+        if voice_language != language:
+            raise ValueError(
+                f"voice {voice} is not available for {language}; "
+                f"choose a {language} voice or Auto"
+            )
 
-        started = time.perf_counter()
-        pipeline = self._pipeline(language)
-        synthesis_started = time.perf_counter()
         logger.info(
-            "Starting Kokoro synthesis: language=%s voice=%s characters=%d speed=%.2f",
-            language,
+            "Kokoro synthesis routing: detected_language=%s selected_voice=%s "
+            "pipeline_language=%s characters=%d speed=%.2f",
+            detected_language,
             voice,
+            language,
             len(text),
             request.speaking_rate,
         )
+        started = time.perf_counter()
+        pipeline = self._pipeline(language)
+        synthesis_started = time.perf_counter()
         try:
             generated = pipeline(text, voice=voice, speed=request.speaking_rate)
             samples = _collect_samples(item[2] for item in generated)
