@@ -1,3 +1,4 @@
+import logging
 import tempfile
 from pathlib import Path
 from uuid import uuid4
@@ -14,7 +15,12 @@ from tts import (
 )
 
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
 AUDIO_DIR = Path(tempfile.gettempdir()) / "web-reader-audio"
+# Providers are intentionally process-scoped: Kokoro's provider owns its cached
+# per-language pipelines, so subsequent Read Aloud clicks reuse loaded models.
+TTS_SERVICE = TTSService([KokoroTTSProvider(), PiperTTSProvider()], default_provider="kokoro")
 
 
 def read_article(url):
@@ -53,8 +59,7 @@ def read_aloud(article_text, voice_choice="Auto (recommended)", playback_speed=1
     try:
         language = detect_language(article_text)
         voice_id = None if voice_choice.startswith("Auto") else voice_choice
-        service = TTSService([KokoroTTSProvider(), PiperTTSProvider()], default_provider="kokoro")
-        result = service.synthesize(
+        result = TTS_SERVICE.synthesize(
             article_text,
             voice_id=voice_id,
             language=language,
