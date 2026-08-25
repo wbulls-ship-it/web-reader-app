@@ -1,7 +1,13 @@
 """Provider-neutral text-to-speech architecture skeleton."""
 
 from .fake_provider import FakeTTSProvider
-from .kokoro_provider import KokoroNotInstalledError, KokoroSynthesisError, KokoroTTSProvider
+from .kokoro_provider import (
+    DEFAULT_VOICES,
+    VOICE_LANGUAGES,
+    KokoroNotInstalledError,
+    KokoroSynthesisError,
+    KokoroTTSProvider,
+)
 from .piper_provider import (
     PiperNotInstalledError,
     PiperSynthesisError,
@@ -14,6 +20,7 @@ from .text_utils import detect_language, join_chunks, normalize_text, split_text
 
 __all__ = [
     "FakeTTSProvider",
+    "DEFAULT_VOICES",
     "KokoroNotInstalledError",
     "KokoroSynthesisError",
     "KokoroTTSProvider",
@@ -26,6 +33,7 @@ __all__ = [
     "TTSProvider",
     "TTSService",
     "Voice",
+    "VOICE_LANGUAGES",
     "detect_language",
     "join_chunks",
     "normalize_text",

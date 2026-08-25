@@ -99,7 +99,7 @@ class KokoroTTSProviderTests(unittest.TestCase):
             self.assertEqual(audio.getframerate(), 24_000)
             self.assertEqual(audio.getnframes(), 3)
 
-    def test_voice_choice_selects_matching_pipeline(self):
+    def test_english_voice_choice_selects_english_pipeline(self):
         language_codes = []
 
         def factory(lang_code):
@@ -107,9 +107,40 @@ class KokoroTTSProviderTests(unittest.TestCase):
             return lambda text, voice, speed: [(None, None, [0.1])]
 
         provider = KokoroTTSProvider(factory)
-        provider.synthesize(SynthesisRequest(text="English", language="en", voice_id="zf_xiaoyi"))
+        provider.synthesize(SynthesisRequest(text="English", language="en", voice_id="af_heart"))
 
-        self.assertEqual(language_codes, ["z"])
+        self.assertEqual(language_codes, ["a"])
+
+    def test_auto_detects_english_and_uses_heart(self):
+        calls = []
+
+        def factory(lang_code):
+            return lambda text, voice, speed: calls.append((lang_code, voice, speed)) or [(None, None, [0.1])]
+
+        provider = KokoroTTSProvider(factory)
+        result = provider.synthesize(SynthesisRequest(text="This is an English article."))
+
+        self.assertEqual(calls, [("a", "af_heart", 1.0)])
+        self.assertEqual(result.voice_id, "af_heart")
+
+    def test_rejects_cross_language_voice_choices(self):
+        provider = KokoroTTSProvider(lambda **kwargs: None)
+
+        with self.assertRaisesRegex(ValueError, "not available for en"):
+            provider.synthesize(SynthesisRequest(text="English", language="en", voice_id="zf_xiaoyi"))
+        with self.assertRaisesRegex(ValueError, "not available for zh"):
+            provider.synthesize(SynthesisRequest(text="中文", language="zh", voice_id="af_heart"))
+
+    def test_switching_chinese_voices_reaches_pipeline(self):
+        voices = []
+        provider = KokoroTTSProvider(
+            lambda **kwargs: lambda text, voice, speed: voices.append(voice) or [(None, None, [0.1])]
+        )
+
+        provider.synthesize(SynthesisRequest(text="你好", language="zh", voice_id="zf_xiaoxiao"))
+        provider.synthesize(SynthesisRequest(text="你好", language="zh", voice_id="zf_xiaoyi"))
+
+        self.assertEqual(voices, ["zf_xiaoxiao", "zf_xiaoyi"])
 
     def test_reuses_each_loaded_language_pipeline(self):
         language_codes = []

@@ -6,6 +6,7 @@ from uuid import uuid4
 import gradio as gr
 from core import extract_article
 from tts import (
+    VOICE_LANGUAGES,
     KokoroNotInstalledError,
     KokoroSynthesisError,
     KokoroTTSProvider,
@@ -21,6 +22,26 @@ AUDIO_DIR = Path(tempfile.gettempdir()) / "web-reader-audio"
 # Providers are intentionally process-scoped: Kokoro's provider owns its cached
 # per-language pipelines, so subsequent Read Aloud clicks reuse loaded models.
 TTS_SERVICE = TTSService([KokoroTTSProvider(), PiperTTSProvider()], default_provider="kokoro")
+
+AUTO_VOICE = "Auto (recommended)"
+VOICE_LABELS = {
+    "zf_xiaoxiao": "Xiaoxiao (Chinese, default)",
+    "zf_xiaoyi": "Xiaoyi (Chinese)",
+    "af_heart": "Heart (English, default)",
+}
+
+
+def voice_options(article_text):
+    """Return only the voices compatible with the article's detected language."""
+
+    language = detect_language(article_text)
+    choices = [(AUTO_VOICE, AUTO_VOICE)]
+    choices.extend(
+        (VOICE_LABELS[voice_id], voice_id)
+        for voice_id, voice_language in VOICE_LANGUAGES.items()
+        if voice_language == language
+    )
+    return gr.update(choices=choices, value=AUTO_VOICE)
 
 
 def read_article(url):
@@ -51,19 +72,19 @@ def read_article(url):
     )
 
 
-def read_aloud(article_text, voice_choice="Auto (recommended)", playback_speed=1.0):
+def read_aloud(article_text, voice_choice=AUTO_VOICE, reading_speed=1.0):
     article_text = (article_text or "").strip()
     if not article_text:
         return "请先成功提取一篇文章，再点击 Read Aloud。", None
 
     try:
         language = detect_language(article_text)
-        voice_id = None if voice_choice.startswith("Auto") else voice_choice
+        voice_id = None if voice_choice == AUTO_VOICE else voice_choice
         result = TTS_SERVICE.synthesize(
             article_text,
             voice_id=voice_id,
             language=language,
-            speaking_rate=float(playback_speed),
+            speaking_rate=float(reading_speed),
             audio_format="wav",
         )
     except KokoroNotInstalledError as exc:
@@ -91,12 +112,22 @@ with gr.Blocks(title="Web Reader") as demo:
 
     read_button = gr.Button("Read Aloud")
     voice_input = gr.Dropdown(
-        ["Auto (recommended)", "zf_xiaoxiao", "zf_xiaoyi", "af_heart"],
-        value="Auto (recommended)",
-        label="朗读声音",
+        [(AUTO_VOICE, AUTO_VOICE), (VOICE_LABELS["af_heart"], "af_heart")],
+        value=AUTO_VOICE,
+        label="Voice (matches article language)",
+        info="Auto detects the article language and uses its default voice.",
     )
-    speed_input = gr.Slider(0.5, 2.0, value=1.0, step=0.1, label="播放速度")
-    audio_output = gr.Audio(label="朗读音频", type="filepath")
+    speed_input = gr.Slider(
+        0.5,
+        2.0,
+        value=1.0,
+        step=0.1,
+        label="Reading speed",
+        info="Controls Kokoro speaking speed; player controls below affect playback/volume only.",
+    )
+    audio_output = gr.Audio(label="Audio player (playback and volume)", type="filepath")
+
+    text_output.change(fn=voice_options, inputs=text_output, outputs=voice_input)
 
     extract_button.click(
         fn=read_article,
