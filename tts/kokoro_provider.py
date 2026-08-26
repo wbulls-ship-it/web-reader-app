@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import io
 import logging
@@ -57,17 +58,20 @@ class KokoroTTSProvider:
         ]
 
     def synthesize(self, request: SynthesisRequest) -> SynthesisResult:
+        request_started = time.perf_counter()
         if request.audio_format.lower() != "wav":
             raise ValueError("Kokoro only supports WAV output")
+        preprocessing_started = time.perf_counter()
         text = normalize_text(request.text)
+        detected_language = detect_language(text) if text else "en"
+        language = _language_code(request.language) if request.language else detected_language
+        voice = request.voice_id or DEFAULT_VOICES[language]
+        preprocessing_seconds = time.perf_counter() - preprocessing_started
         if not text:
             raise ValueError("text is required")
         if not 0.5 <= request.speaking_rate <= 2.0:
             raise ValueError("speaking_rate must be between 0.5 and 2.0")
 
-        detected_language = detect_language(text)
-        language = _language_code(request.language) if request.language else detected_language
-        voice = request.voice_id or DEFAULT_VOICES[language]
         voice_language = VOICE_LANGUAGES.get(voice)
         if voice_language is None:
             raise ValueError(f"unsupported Kokoro voice: {voice}")
@@ -86,8 +90,17 @@ class KokoroTTSProvider:
             len(text),
             request.speaking_rate,
         )
-        started = time.perf_counter()
-        pipeline = self._pipeline(language)
+        pipeline, model_load_seconds, pipeline_cached = self._pipeline(language)
+        device = _pipeline_device(pipeline)
+        logger.info(
+            "Kokoro runtime: torch_device=%s cuda_available=%s model_load=%.3fs "
+            "pipeline_cached=%s preprocessing=%.3fs",
+            device["torch_device"],
+            device["cuda_available"],
+            model_load_seconds,
+            pipeline_cached,
+            preprocessing_seconds,
+        )
         synthesis_started = time.perf_counter()
         try:
             generated = pipeline(text, voice=voice, speed=request.speaking_rate)
@@ -109,10 +122,14 @@ class KokoroTTSProvider:
         serialization_started = time.perf_counter()
         audio = _wav_bytes(samples)
         serialization_seconds = time.perf_counter() - serialization_started
-        total_seconds = time.perf_counter() - started
+        total_seconds = time.perf_counter() - request_started
         logger.info(
-            "Finished Kokoro synthesis: samples=%d synthesis=%.3fs wav=%.3fs total=%.3fs",
+            "Finished Kokoro synthesis: voice=%s samples=%d model_load=%.3fs "
+            "preprocessing=%.3fs inference=%.3fs wav=%.3fs total=%.3fs",
+            voice,
             samples.size,
+            model_load_seconds,
+            preprocessing_seconds,
             synthesis_seconds,
             serialization_seconds,
             total_seconds,
@@ -126,6 +143,18 @@ class KokoroTTSProvider:
             metadata={
                 "characters": str(len(text)),
                 "language": language,
+                "selected_voice": voice,
+                "model_load_seconds": f"{model_load_seconds:.3f}",
+                "pipeline_cached": str(pipeline_cached).lower(),
+                "text_preprocessing_seconds": f"{preprocessing_seconds:.3f}",
+                "kokoro_inference_seconds": f"{synthesis_seconds:.3f}",
+                "wav_serialization_seconds": f"{serialization_seconds:.3f}",
+                "total_request_seconds": f"{total_seconds:.3f}",
+                "torch_device": device["torch_device"],
+                "cuda_available": device["cuda_available"],
+                "torch_version": device["torch_version"],
+                "cuda_version": device["cuda_version"],
+                "audio_sha256": hashlib.sha256(audio).hexdigest(),
                 "synthesis_seconds": f"{synthesis_seconds:.3f}",
                 "wav_seconds": f"{serialization_seconds:.3f}",
             },
@@ -134,10 +163,12 @@ class KokoroTTSProvider:
     def _pipeline(self, language: str):
         pipeline = self._pipelines.get(language)
         if pipeline is not None:
-            return pipeline
+            return pipeline, 0.0, True
 
         with self._pipeline_lock:
             pipeline = self._pipelines.get(language)
+            if pipeline is not None:
+                return pipeline, 0.0, True
             if pipeline is None:
                 started = time.perf_counter()
                 logger.info("Loading Kokoro pipeline: language=%s", language)
@@ -157,7 +188,8 @@ class KokoroTTSProvider:
                     language,
                     time.perf_counter() - started,
                 )
-        return pipeline
+                load_seconds = time.perf_counter() - started
+        return pipeline, load_seconds, False
 
     @staticmethod
     def _load_pipeline_factory():
@@ -176,6 +208,32 @@ class KokoroTTSProvider:
 
 def _language_code(language: str | None) -> str:
     return "zh" if (language or "").lower().startswith("zh") else "en"
+
+
+def _pipeline_device(pipeline: object) -> dict[str, str]:
+    """Report both CUDA capability and the device actually holding the model."""
+
+    try:
+        torch = importlib.import_module("torch")
+    except ImportError:
+        return {
+            "torch_device": "unavailable",
+            "cuda_available": "false",
+            "torch_version": "unavailable",
+            "cuda_version": "unavailable",
+        }
+
+    model = getattr(pipeline, "model", None)
+    try:
+        actual_device = str(next(model.parameters()).device)
+    except (AttributeError, StopIteration, TypeError):
+        actual_device = "cuda" if torch.cuda.is_available() else "cpu"
+    return {
+        "torch_device": actual_device,
+        "cuda_available": str(torch.cuda.is_available()).lower(),
+        "torch_version": str(torch.__version__),
+        "cuda_version": str(torch.version.cuda or "none"),
+    }
 
 
 def _collect_samples(parts: Iterable[object]) -> np.ndarray:

@@ -142,6 +142,34 @@ class KokoroTTSProviderTests(unittest.TestCase):
 
         self.assertEqual(voices, ["zf_xiaoxiao", "zf_xiaoyi"])
 
+    def test_diagnostics_report_timings_device_and_distinct_voice_audio(self):
+        def pipeline(text, voice, speed):
+            sample = 0.1 if voice == "zf_xiaoxiao" else 0.2
+            return [(None, None, np.array([sample], dtype=np.float32))]
+
+        provider = KokoroTTSProvider(lambda **kwargs: pipeline)
+        first = provider.synthesize(
+            SynthesisRequest(text="你好", language="zh", voice_id="zf_xiaoxiao")
+        )
+        second = provider.synthesize(
+            SynthesisRequest(text="你好", language="zh", voice_id="zf_xiaoyi")
+        )
+
+        for result, voice in ((first, "zf_xiaoxiao"), (second, "zf_xiaoyi")):
+            self.assertEqual(result.metadata["selected_voice"], voice)
+            self.assertIn(result.metadata["torch_device"], ("cpu", "cuda", "unavailable"))
+            for key in (
+                "model_load_seconds",
+                "text_preprocessing_seconds",
+                "kokoro_inference_seconds",
+                "wav_serialization_seconds",
+                "total_request_seconds",
+            ):
+                self.assertGreaterEqual(float(result.metadata[key]), 0.0)
+        self.assertEqual(first.metadata["pipeline_cached"], "false")
+        self.assertEqual(second.metadata["pipeline_cached"], "true")
+        self.assertNotEqual(first.metadata["audio_sha256"], second.metadata["audio_sha256"])
+
     def test_reuses_each_loaded_language_pipeline(self):
         language_codes = []
 
