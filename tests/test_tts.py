@@ -3,6 +3,7 @@ import unittest
 import wave
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -25,6 +26,7 @@ from tts import (
     split_text,
 )
 from tts.provider import SynthesisRequest
+from tts.matcha_provider import _create_engine
 
 
 class TextUtilitiesTests(unittest.TestCase):
@@ -110,7 +112,10 @@ class MatchaTTSProviderTests(unittest.TestCase):
                 return Audio()
 
         with TemporaryDirectory() as tmpdir:
-            provider = MatchaTTSProvider(self._paths(Path(tmpdir)), engine_factory=lambda paths, threads: Engine())
+            provider = MatchaTTSProvider(
+                self._paths(Path(tmpdir)),
+                engine_factory=lambda paths, threads, language: Engine(),
+            )
             chinese = provider.synthesize(SynthesisRequest(text="这是中文。"))
             english = provider.synthesize(SynthesisRequest(text="This is English."))
 
@@ -131,13 +136,68 @@ class MatchaTTSProviderTests(unittest.TestCase):
                 return Audio()
 
         with TemporaryDirectory() as tmpdir:
-            provider = MatchaTTSProvider(self._paths(Path(tmpdir)), engine_factory=lambda paths, threads: Engine())
+            provider = MatchaTTSProvider(
+                self._paths(Path(tmpdir)),
+                engine_factory=lambda paths, threads, language: Engine(),
+            )
             result = provider.synthesize(SynthesisRequest(text="Speed test", speaking_rate=1.4))
 
         self.assertEqual(speeds, [1.4])
         self.assertEqual(result.provider, "matcha")
         with wave.open(BytesIO(result.audio), "rb") as audio:
             self.assertEqual(audio.getparams()[:4], (1, 2, 16_000, 3))
+
+    def test_uses_language_specific_engines_and_caches_each(self):
+        created = []
+
+        class Audio:
+            samples = [0.1]
+            sample_rate = 16_000
+
+        class Engine:
+            def generate(self, text, sid, speed):
+                return Audio()
+
+        def factory(paths, threads, language):
+            created.append(language)
+            return Engine()
+
+        with TemporaryDirectory() as tmpdir:
+            provider = MatchaTTSProvider(self._paths(Path(tmpdir)), engine_factory=factory)
+            provider.synthesize(SynthesisRequest(text="English 123", language="en"))
+            provider.synthesize(SynthesisRequest(text="More English 456", language="en"))
+            provider.synthesize(SynthesisRequest(text="中文 123", language="zh"))
+            provider.synthesize(SynthesisRequest(text="更多中文 456", language="zh"))
+
+        self.assertEqual(created, ["en", "zh"])
+
+    def test_chinese_rules_are_excluded_from_english_engine_config(self):
+        configs = []
+
+        class Config(SimpleNamespace):
+            def validate(self):
+                return True
+
+        fake_sherpa = SimpleNamespace(
+            OfflineTtsMatchaModelConfig=lambda **values: SimpleNamespace(**values),
+            OfflineTtsModelConfig=lambda **values: SimpleNamespace(**values),
+            OfflineTtsConfig=lambda **values: Config(**values),
+            OfflineTts=lambda config: configs.append(config) or SimpleNamespace(config=config),
+        )
+        with TemporaryDirectory() as tmpdir, patch(
+            "tts.matcha_provider.importlib.import_module", return_value=fake_sherpa
+        ):
+            paths = self._paths(Path(tmpdir))
+            _create_engine(paths, 2, "en")
+            _create_engine(paths, 2, "zh")
+
+        self.assertEqual(configs[0].rule_fsts, "")
+        self.assertEqual(
+            configs[1].rule_fsts,
+            ",".join(map(str, (paths.phone_fst, paths.date_fst, paths.number_fst))),
+        )
+        self.assertEqual(configs[0].model.matcha, configs[1].model.matcha)
+        self.assertEqual(configs[0].model.num_threads, configs[1].model.num_threads)
 
     def test_missing_models_fail_with_every_missing_path(self):
         with TemporaryDirectory() as tmpdir:
