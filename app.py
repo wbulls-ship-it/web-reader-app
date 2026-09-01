@@ -6,11 +6,13 @@ from uuid import uuid4
 import gradio as gr
 from core import extract_article
 from tts import (
-    VOICE_LANGUAGES,
     KokoroNotInstalledError,
     KokoroSynthesisError,
     KokoroTTSProvider,
-    PiperTTSProvider,
+    MatchaModelNotFoundError,
+    MatchaNotInstalledError,
+    MatchaSynthesisError,
+    MatchaTTSProvider,
     TTSService,
     detect_language,
 )
@@ -19,29 +21,10 @@ from tts import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 AUDIO_DIR = Path(tempfile.gettempdir()) / "web-reader-audio"
-# Providers are intentionally process-scoped: Kokoro's provider owns its cached
-# per-language pipelines, so subsequent Read Aloud clicks reuse loaded models.
-TTS_SERVICE = TTSService([KokoroTTSProvider(), PiperTTSProvider()], default_provider="kokoro")
-
-AUTO_VOICE = "Auto (recommended)"
-VOICE_LABELS = {
-    "zf_xiaoxiao": "Xiaoxiao (Chinese, default)",
-    "zf_xiaoyi": "Xiaoyi (Chinese)",
-    "af_heart": "Heart (English, default)",
-}
-
-
-def voice_options(article_text):
-    """Return only the voices compatible with the article's detected language."""
-
-    language = detect_language(article_text)
-    choices = [(AUTO_VOICE, AUTO_VOICE)]
-    choices.extend(
-        (VOICE_LABELS[voice_id], voice_id)
-        for voice_id, voice_language in VOICE_LANGUAGES.items()
-        if voice_language == language
-    )
-    return gr.update(choices=choices, value=AUTO_VOICE)
+# Providers are process-scoped so their expensive engines are loaded once. Matcha
+# is the production default; Kokoro remains an explicit optional fallback.
+MATCHA_PROVIDER = MatchaTTSProvider()
+TTS_SERVICE = TTSService([MATCHA_PROVIDER, KokoroTTSProvider()], default_provider="matcha")
 
 
 def read_article(url):
@@ -72,24 +55,25 @@ def read_article(url):
     )
 
 
-def read_aloud(article_text, voice_choice=AUTO_VOICE, reading_speed=1.0):
+def read_aloud(article_text, provider_name="matcha", reading_speed=1.0):
     article_text = (article_text or "").strip()
     if not article_text:
         return "请先成功提取一篇文章，再点击 Read Aloud。", None
 
     try:
         language = detect_language(article_text)
-        voice_id = None if voice_choice == AUTO_VOICE else voice_choice
         result = TTS_SERVICE.synthesize(
             article_text,
-            voice_id=voice_id,
+            provider_name=provider_name,
             language=language,
             speaking_rate=float(reading_speed),
             audio_format="wav",
         )
+    except (MatchaNotInstalledError, MatchaModelNotFoundError) as exc:
+        return f"Matcha 尚未就绪：{exc}", None
     except KokoroNotInstalledError as exc:
-        return f"Kokoro 未安装或与当前 Python 版本不兼容：{exc}", None
-    except (KokoroSynthesisError, ValueError, OSError) as exc:
+        return f"Kokoro fallback 尚未就绪：{exc}", None
+    except (MatchaSynthesisError, KokoroSynthesisError, ValueError, OSError) as exc:
         return f"语音合成失败：{exc}", None
 
     AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -100,22 +84,27 @@ def read_aloud(article_text, voice_choice=AUTO_VOICE, reading_speed=1.0):
 
 with gr.Blocks(title="Web Reader") as demo:
     gr.Markdown("# Web Reader")
-    gr.Markdown("输入网页网址，自动提取文章标题和正文。")
+    gr.Markdown("粘贴文章网址，提取正文，然后用 CPU 生成中英文朗读音频。")
+
+    readiness = MATCHA_PROVIDER.readiness_error()
+    gr.Markdown(
+        "**TTS 状态：** " + (f"⚠️ {readiness}" if readiness else "✅ Matcha 已就绪（CPU）")
+    )
 
     url_input = gr.Textbox(label="网页网址", placeholder="请输入文章网址……")
-    extract_button = gr.Button("Extract Article")
+    extract_button = gr.Button("1. Extract Article", variant="primary")
 
     title_output = gr.Textbox(label="文章标题")
     info_output = gr.Textbox(label="文章信息")
     text_output = gr.Textbox(label="文章正文", lines=25)
     status_output = gr.Textbox(label="状态")
 
-    read_button = gr.Button("Read Aloud")
-    voice_input = gr.Dropdown(
-        [(AUTO_VOICE, AUTO_VOICE), (VOICE_LABELS["af_heart"], "af_heart")],
-        value=AUTO_VOICE,
-        label="Voice (matches article language)",
-        info="Auto detects the article language and uses its default voice.",
+    read_button = gr.Button("2. Read Aloud", variant="primary")
+    provider_input = gr.Dropdown(
+        [("Matcha ZH+EN (production default)", "matcha"), ("Kokoro (optional fallback)", "kokoro")],
+        value="matcha",
+        label="TTS provider",
+        info="Matcha automatically handles Chinese and English. Kokoro is optional.",
     )
     speed_input = gr.Slider(
         0.5,
@@ -123,11 +112,9 @@ with gr.Blocks(title="Web Reader") as demo:
         value=1.0,
         step=0.1,
         label="Reading speed",
-        info="Controls Kokoro speaking speed; player controls below affect playback/volume only.",
+        info="0.5× is slower, 1.0× is normal, and 2.0× is faster.",
     )
     audio_output = gr.Audio(label="Audio player (playback and volume)", type="filepath")
-
-    text_output.change(fn=voice_options, inputs=text_output, outputs=voice_input)
 
     extract_button.click(
         fn=read_article,
@@ -141,10 +128,10 @@ with gr.Blocks(title="Web Reader") as demo:
     )
     read_button.click(
         fn=read_aloud,
-        inputs=[text_output, voice_input, speed_input],
+        inputs=[text_output, provider_input, speed_input],
         outputs=[status_output, audio_output],
     )
 
 
 if __name__ == "__main__":
-    demo.launch(debug=True, share=True)
+    demo.launch()
