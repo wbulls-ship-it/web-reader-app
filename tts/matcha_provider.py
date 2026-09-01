@@ -83,14 +83,17 @@ class MatchaTTSProvider:
         paths: MatchaPaths | None = None,
         *,
         num_threads: int | None = None,
-        engine_factory: Callable[[MatchaPaths, int], object] | None = None,
+        engine_factory: Callable[[MatchaPaths, int, str], object] | None = None,
     ):
         self.paths = paths or MatchaPaths.from_environment()
         self.num_threads = num_threads or int(os.getenv("MATCHA_NUM_THREADS", "2"))
         if self.num_threads < 1:
             raise ValueError("MATCHA_NUM_THREADS must be at least 1")
         self._engine_factory = engine_factory
-        self._engine: object | None = None
+        # The Chinese TN FSTs are global OfflineTts configuration, not a
+        # per-generate language option.  Keep an FST-free reference engine for
+        # English and a Chinese-normalizing engine for Chinese.
+        self._engines: dict[str, object] = {}
         self._lock = threading.Lock()
 
     def list_voices(self) -> list[Voice]:
@@ -123,8 +126,8 @@ class MatchaTTSProvider:
                 + ", ".join(str(path) for path in missing)
                 + ". Set MATCHA_MODEL_DIR or the individual MATCHA_* path variables."
             )
-        engine = self._get_engine()
         language = _language_code(request.language) if request.language else detect_language(text)
+        engine = self._get_engine(language)
         try:
             generated = engine.generate(text, sid=0, speed=request.speaking_rate)
             samples = np.asarray(generated.samples, dtype=np.float32).reshape(-1)
@@ -149,16 +152,18 @@ class MatchaTTSProvider:
             },
         )
 
-    def _get_engine(self) -> object:
-        if self._engine is not None:
-            return self._engine
+    def _get_engine(self, language: str) -> object:
+        if language in self._engines:
+            return self._engines[language]
         with self._lock:
-            if self._engine is None:
-                self._engine = (self._engine_factory or _create_engine)(self.paths, self.num_threads)
-        return self._engine
+            if language not in self._engines:
+                self._engines[language] = (self._engine_factory or _create_engine)(
+                    self.paths, self.num_threads, language
+                )
+        return self._engines[language]
 
 
-def _create_engine(paths: MatchaPaths, num_threads: int) -> object:
+def _create_engine(paths: MatchaPaths, num_threads: int, language: str) -> object:
     try:
         sherpa = importlib.import_module("sherpa_onnx")
     except ImportError as exc:
@@ -174,7 +179,13 @@ def _create_engine(paths: MatchaPaths, num_threads: int) -> object:
     )
     config = sherpa.OfflineTtsConfig(
         model=model,
-        rule_fsts=",".join(map(str, (paths.phone_fst, paths.date_fst, paths.number_fst))),
+        # These are Chinese text-normalization grammars. Applying them to an
+        # English request makes e.g. English digits expand as Chinese words.
+        rule_fsts=(
+            ",".join(map(str, (paths.phone_fst, paths.date_fst, paths.number_fst)))
+            if language == "zh"
+            else ""
+        ),
         max_num_sentences=1,
     )
     if not config.validate():

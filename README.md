@@ -17,9 +17,14 @@ The application has three deliberately separate layers:
 3. `app.py` presents the URL → extract → read workflow and writes generated WAV
    bytes to a temporary directory for Gradio playback.
 
-`MatchaTTSProvider` validates assets before loading, lazy-loads one process-scoped
-`sherpa_onnx.OfflineTts` engine, detects Chinese or English automatically, passes
+`MatchaTTSProvider` validates assets before loading, lazy-loads language-specific
+`sherpa_onnx.OfflineTts` engines, detects Chinese or English automatically, passes
 the selected reading speed to sherpa-onnx, and serializes mono PCM WAV output.
+English uses the model's reference FST-free path; Chinese alone loads
+`phone-zh.fst`, `date-zh.fst`, and `number-zh.fst`. This separation is necessary
+because sherpa's rules belong to the engine configuration rather than an individual
+request: loading the Chinese number grammar globally caused digits in English text
+to be expanded in Chinese and changed the resulting utterance.
 Matcha is registered first and is the default for both languages. Select Kokoro in
 the UI only when an optional fallback is desired. Piper remains in the codebase for
 compatibility but is no longer registered in the production app.
@@ -87,6 +92,18 @@ After placing the assets, run:
 ```bash
 python app.py
 ```
+
+To reproduce the English regression comparison with one sentence, run:
+
+```bash
+python scripts/diagnose_matcha_english.py --model-dir /path/to/matcha-icefall-zh-en
+```
+
+It writes `a-reference-english.wav`, `b-provider-english.wav`, and a
+`legacy-chinese-fsts-english.wav` control, and reports synthesis time, duration,
+RTF, and SHA-256 for each. The reference and provider paths have the same Matcha
+model, lexicon, tokens, espeak data, speaker 0, speed 1.0, 16 kHz vocoder, and raw
+input sentence; the control changes only the Chinese FST configuration.
 
 Open the local Gradio address, enter an HTTP(S) article URL, select **Extract
 Article**, then **Read Aloud**. The default provider handles Chinese and English
