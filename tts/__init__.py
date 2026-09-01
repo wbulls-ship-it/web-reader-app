@@ -8,6 +8,13 @@ from .kokoro_provider import (
     KokoroSynthesisError,
     KokoroTTSProvider,
 )
+from .matcha_provider import (
+    MatchaModelNotFoundError,
+    MatchaNotInstalledError,
+    MatchaPaths,
+    MatchaSynthesisError,
+    MatchaTTSProvider,
+)
 from .piper_provider import (
     PiperNotInstalledError,
     PiperSynthesisError,
@@ -24,6 +31,11 @@ __all__ = [
     "KokoroNotInstalledError",
     "KokoroSynthesisError",
     "KokoroTTSProvider",
+    "MatchaModelNotFoundError",
+    "MatchaNotInstalledError",
+    "MatchaPaths",
+    "MatchaSynthesisError",
+    "MatchaTTSProvider",
     "PiperNotInstalledError",
     "PiperSynthesisError",
     "PiperTTSProvider",

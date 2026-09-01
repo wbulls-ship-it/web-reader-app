@@ -11,6 +11,9 @@ import numpy as np
 from tts import (
     FakeTTSProvider,
     KokoroTTSProvider,
+    MatchaModelNotFoundError,
+    MatchaPaths,
+    MatchaTTSProvider,
     PiperNotInstalledError,
     PiperTTSProvider,
     PiperVoiceNotFoundError,
@@ -70,6 +73,89 @@ class TTSServiceTests(unittest.TestCase):
             service.synthesize("   ")
         with self.assertRaises(ValueError):
             service.synthesize("hello", provider_name="missing")
+
+    def test_explicit_provider_selection_overrides_default(self):
+        first = FakeTTSProvider()
+        fallback = FakeTTSProvider()
+        first.name = "matcha"
+        fallback.name = "kokoro"
+        service = TTSService([first, fallback], default_provider="matcha")
+
+        self.assertEqual(service.synthesize("default").provider, "matcha")
+        self.assertEqual(service.synthesize("fallback", provider_name="kokoro").provider, "kokoro")
+
+
+class MatchaTTSProviderTests(unittest.TestCase):
+    def _paths(self, root: Path, *, complete: bool = True) -> MatchaPaths:
+        paths = MatchaPaths.from_environment(root)
+        if complete:
+            paths.data_dir.mkdir(parents=True)
+            for path in (
+                paths.acoustic_model, paths.vocoder, paths.lexicon, paths.tokens,
+                paths.phone_fst, paths.date_fst, paths.number_fst,
+            ):
+                path.write_text("test")
+        return paths
+
+    def test_routes_chinese_and_english_through_bilingual_engine(self):
+        calls = []
+
+        class Audio:
+            samples = np.array([0.1, -0.1], dtype=np.float32)
+            sample_rate = 16_000
+
+        class Engine:
+            def generate(self, text, sid, speed):
+                calls.append((text, sid, speed))
+                return Audio()
+
+        with TemporaryDirectory() as tmpdir:
+            provider = MatchaTTSProvider(self._paths(Path(tmpdir)), engine_factory=lambda paths, threads: Engine())
+            chinese = provider.synthesize(SynthesisRequest(text="这是中文。"))
+            english = provider.synthesize(SynthesisRequest(text="This is English."))
+
+        self.assertEqual(chinese.metadata["language"], "zh")
+        self.assertEqual(english.metadata["language"], "en")
+        self.assertEqual(calls, [("这是中文。", 0, 1.0), ("This is English.", 0, 1.0)])
+
+    def test_passes_reading_speed_and_returns_valid_wav(self):
+        speeds = []
+
+        class Audio:
+            samples = [0.0, 0.5, -0.5]
+            sample_rate = 16_000
+
+        class Engine:
+            def generate(self, text, sid, speed):
+                speeds.append(speed)
+                return Audio()
+
+        with TemporaryDirectory() as tmpdir:
+            provider = MatchaTTSProvider(self._paths(Path(tmpdir)), engine_factory=lambda paths, threads: Engine())
+            result = provider.synthesize(SynthesisRequest(text="Speed test", speaking_rate=1.4))
+
+        self.assertEqual(speeds, [1.4])
+        self.assertEqual(result.provider, "matcha")
+        with wave.open(BytesIO(result.audio), "rb") as audio:
+            self.assertEqual(audio.getparams()[:4], (1, 2, 16_000, 3))
+
+    def test_missing_models_fail_with_every_missing_path(self):
+        with TemporaryDirectory() as tmpdir:
+            provider = MatchaTTSProvider(self._paths(Path(tmpdir), complete=False))
+            with self.assertRaises(MatchaModelNotFoundError) as error:
+                provider.synthesize(SynthesisRequest(text="hello"))
+
+        self.assertIn("model-steps-3.onnx", str(error.exception))
+        self.assertIn("vocos-16khz-univ.onnx", str(error.exception))
+        self.assertIn("espeak-ng-data", str(error.exception))
+
+    def test_rejects_invalid_speed_and_non_wav_output(self):
+        with TemporaryDirectory() as tmpdir:
+            provider = MatchaTTSProvider(self._paths(Path(tmpdir)))
+            with self.assertRaisesRegex(ValueError, "speaking_rate"):
+                provider.synthesize(SynthesisRequest(text="hello", speaking_rate=2.1))
+            with self.assertRaisesRegex(ValueError, "WAV"):
+                provider.synthesize(SynthesisRequest(text="hello", audio_format="mp3"))
 
 
 class KokoroTTSProviderTests(unittest.TestCase):
